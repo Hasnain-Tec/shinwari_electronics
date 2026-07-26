@@ -1,0 +1,4 @@
+import React from 'react'
+import { download } from '../api'
+import { Button, Card, PageHeader } from '../components/Ui'
+export default function BackupPage(){return <><PageHeader title="Backup" subtitle="Download a complete copy of the local SQLite database"/><Card className="backup-card"><div className="backup-icon">⇩</div><h2>Database Backup</h2><p>Creates a downloadable copy of all customers, suppliers, products, sales, purchases, payments, expenses and settings.</p><Button onClick={()=>download('/backup/download/',`medtrade-backup-${new Date().toISOString().slice(0,10)}.sqlite3`)}>Download Backup</Button><div className="warning-box"><strong>Important:</strong> Keep backups on a second drive or secure cloud folder. Restore is intentionally not exposed in the browser MVP because replacing a live database requires extra safety checks.</div></Card></>}
