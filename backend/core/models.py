@@ -13,7 +13,7 @@ class TimeStampedModel(models.Model):
 
 
 class CompanySetting(TimeStampedModel):
-    company_name = models.CharField(max_length=180, default='MedTrade Inventory')
+    company_name = models.CharField(max_length=180, default='Shinwari Electronics and Decoration')
     address = models.TextField(blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=60, blank=True)

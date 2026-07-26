@@ -16,7 +16,9 @@ class Command(BaseCommand):
             user.is_superuser = True
             user.save(update_fields=['is_staff', 'is_superuser'])
         EmployeeProfile.objects.get_or_create(user=user, defaults={'role': 'ADMIN'})
-        CompanySetting.objects.get_or_create(pk=1)
+        setting, _ = CompanySetting.objects.get_or_create(pk=1, defaults={'company_name': 'Shinwari Electronics and Decoration'})
+        setting.company_name = 'Shinwari Electronics and Decoration'
+        setting.save()
         for name in ['Screens', 'Electronic Equipment', 'Mobile Accessories', 'Cables & Chargers','Speakers & Sound','Lights & Decoration','Repair Parts','General']:
             Category.objects.get_or_create(name=name)
         for name in ['Rent', 'Salary', 'Electricity', 'Internet', 'Transportation', 'Fuel', 'Office Supplies', 'Marketing', 'Maintenance', 'Bank Charges', 'Other']:

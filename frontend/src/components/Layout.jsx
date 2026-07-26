@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import logoImg from '../assets/shinwari-logo.jpeg'
 
 const items = [
   ['dashboard','Dashboard','▦'], ['customers','Customers','◎'], ['suppliers','Suppliers','◇'],
@@ -15,17 +16,18 @@ export default function Layout({ page, setPage, user, company, onLogout, childre
       <div className="brand">
         <div className="brand-logo-wrap">
           <img
-            src="/shinwari-logo.jpeg"
-            alt="Shinwari Electronics & Decorations"
+            src={logoImg}
+            alt="Shinwari Electronics and Decoration"
             className="brand-logo"
           />
         </div>
 
         <div className="brand-text">
-          <strong>{company?.company_name || 'Shinwari'}</strong>
-          <small>Electronics & Decorations</small>
+          <strong>{company?.company_name || 'Shinwari Electronics'}</strong>
+          <small>and Decoration</small>
         </div>
       </div>
+
 
       <nav>
         {items.map(([id,label,icon]) =>
