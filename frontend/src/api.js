@@ -1,4 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+
 export function getToken() { return localStorage.getItem('medtrade_token') || '' }
 export function setToken(token) { token ? localStorage.setItem('medtrade_token', token) : localStorage.removeItem('medtrade_token') }
 export function unwrap(data) { return Array.isArray(data) ? data : (data?.results || []) }
@@ -41,6 +42,10 @@ export async function previewPdf(path) {
     URL.revokeObjectURL(url)
     throw new Error('Popup blocked. Please allow popups to preview the PDF.')
   }
-  // Keep the object URL alive long enough for the new tab to load the PDF.
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+// --- ADDED FOR DELETION ---
+export async function deleteDocument(id, type = 'sales') {
+  return await api(`/${type}/${id}/`, { method: 'DELETE' })
 }

@@ -6,6 +6,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import F, Sum, DecimalField, ExpressionWrapper
+from django.db.models.deletion import ProtectedError
 from django.http import FileResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -55,10 +56,34 @@ class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.all().order_by('name')
     serializer_class = CustomerSerializer
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            instance.is_active = False
+            instance.save(update_fields=['is_active', 'updated_at'])
+            return Response(
+                {'detail': 'Customer has linked sales or payment history and was marked inactive.'},
+                status=status.HTTP_200_OK
+            )
+
 
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all().order_by('name')
     serializer_class = SupplierSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            instance.is_active = False
+            instance.save(update_fields=['is_active', 'updated_at'])
+            return Response(
+                {'detail': 'Supplier has linked purchase or payment history and was marked inactive.'},
+                status=status.HTTP_200_OK
+            )
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -69,6 +94,28 @@ class CategoryViewSet(viewsets.ModelViewSet):
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.select_related('category').all().order_by('name')
     serializer_class = ProductSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            has_sales = instance.saleitem_set.exists()
+            has_purchases = instance.purchaseitem_set.exists()
+            if not has_sales and not has_purchases:
+                instance.stock_movements.all().delete()
+                try:
+                    return super().destroy(request, *args, **kwargs)
+                except ProtectedError:
+                    pass
+
+            instance.is_active = False
+            instance.save(update_fields=['is_active', 'updated_at'])
+            return Response(
+                {'detail': 'Product has linked sales or purchase history and was marked inactive.'},
+                status=status.HTTP_200_OK
+            )
+
 
     @action(detail=False, methods=['post'])
     def adjust_stock(self, request):
@@ -86,7 +133,7 @@ class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
 class SaleViewSet(viewsets.ModelViewSet):
     queryset = Sale.objects.select_related('customer', 'salesperson').prefetch_related('items__product').all()
     serializer_class = SaleSerializer
-    http_method_names = ['get', 'post', 'head', 'options']
+    http_method_names = ['get', 'post', 'put', 'delete', 'head', 'options']
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
@@ -117,7 +164,7 @@ class SaleViewSet(viewsets.ModelViewSet):
 class PurchaseViewSet(viewsets.ModelViewSet):
     queryset = Purchase.objects.select_related('supplier', 'created_by').prefetch_related('items__product').all()
     serializer_class = PurchaseSerializer
-    http_method_names = ['get', 'post', 'head', 'options']
+    http_method_names = ['get', 'post', 'put', 'delete', 'head', 'options']
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

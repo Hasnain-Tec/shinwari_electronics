@@ -84,7 +84,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     def get_outstanding_balance(self, obj):
         sales_total = sum((s.total for s in obj.sales.exclude(status='CANCELLED')), Decimal('0'))
         payments_total = sum((p.amount for p in obj.payments.all()), Decimal('0'))
-        return money(obj.opening_balance + sales_total - payments_total)
+        balance = money(obj.opening_balance + sales_total - payments_total)
+        return max(balance, Decimal('0'))
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -192,7 +193,14 @@ class SaleSerializer(serializers.ModelSerializer):
         read_only_fields = ['invoice_no', 'subtotal', 'discount_total', 'vat_total', 'total', 'status', 'salesperson']
 
     def get_balance_due(self, obj):
-        return money(obj.total - obj.amount_paid)
+        if obj.customer_id:
+            paid = sum(
+                (p.amount for p in obj.customer.payments.filter(sale=obj)),
+                Decimal('0')
+            )
+        else:
+            paid = obj.amount_paid
+        return max(money(obj.total - paid), Decimal('0'))
 
     def validate_items(self, items):
         if not items:
@@ -258,8 +266,6 @@ class SaleSerializer(serializers.ModelSerializer):
             sale.discount_total = money(discount_total)
             sale.vat_total = money(vat_total)
             sale.total = money(subtotal - discount_total + vat_total)
-            if sale.amount_paid > sale.total:
-                raise serializers.ValidationError({'amount_paid': 'Paid amount cannot exceed invoice total.'})
             sale.save(update_fields=['subtotal', 'discount_total', 'vat_total', 'total', 'updated_at'])
             if sale.amount_paid > 0 and sale.customer:
                 Payment.objects.create(
@@ -380,6 +386,9 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         company = get_company_setting()
+
+        # If the API supplies a sale, preserve that relationship so invoice
+        # balance and payment history can be calculated from actual payments.
         return Payment.objects.create(
             receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),
             created_by=self.context['request'].user,

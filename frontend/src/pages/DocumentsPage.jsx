@@ -10,6 +10,7 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
   const [products, setProducts] = useState([])
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
+  const [editingId, setEditingId] = useState(null)
   const [invoiceReady, setInvoiceReady] = useState(null)
   const blank = { party:'', date:today(), payment_mode:'CREDIT', amount_paid:'0', notes:'', items:[] }
   const [form, setForm] = useState(blank)
@@ -50,6 +51,25 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
     return {sub:a.sub+gross,disc:a.disc+disc,vat:a.vat+vat,total:a.total+taxable+vat}
   }, {sub:0,disc:0,vat:0,total:0}), [form.items])
 
+  function editDoc(d) {
+    setEditingId(d.id)
+    setForm({
+      party: isSale ? (d.customer || '') : (d.supplier || ''),
+      date: d.date || today(),
+      payment_mode: d.payment_mode || 'CREDIT',
+      amount_paid: d.amount_paid || '0',
+      notes: d.notes || '',
+      items: (d.items || []).map(i => ({
+        product: String(i.product || i.product_id || ''),
+        quantity: String(i.quantity || 1),
+        price: String(i.unit_price || i.unit_cost || i.price || 0),
+        discount: String(i.discount || 0),
+        vat_rate: String(i.vat_rate || 0)
+      }))
+    })
+    setOpen(true)
+  }
+
   async function save(e){
     e.preventDefault()
     try {
@@ -68,11 +88,16 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
         }))
       }
       body[isSale?'customer':'supplier'] = form.party ? Number(form.party) : null
-      const created = await api(endpoint,{method:'POST',body})
+
+      const method = editingId ? 'PUT' : 'POST'
+      const url = editingId ? `${endpoint}${editingId}/` : endpoint
+
+      const created = await api(url, { method, body })
       setOpen(false)
+      setEditingId(null)
       setForm(blank)
       await load()
-      if(isSale) setInvoiceReady(created)
+      if(isSale && !editingId) setInvoiceReady(created)
     } catch(e){ setError(e.message) }
   }
 
@@ -86,17 +111,21 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
     catch(e){ setError(e.message) }
   }
 
-  async function cancelDoc(d){
-    if(!confirm(`Cancel ${isSale?d.invoice_no:d.purchase_no}? Stock will be reversed.`)) return
-    try { await api(`${endpoint}${d.id}/cancel/`,{method:'POST'}); await load() }
-    catch(e){ setError(e.message) }
+  async function deleteDoc(d){
+    const docName = isSale ? d.invoice_no : d.purchase_no
+    if(!confirm(`Are you sure you want to permanently delete ${docName}?`)) return
+    try {
+      setError('')
+      await api(`${endpoint}${d.id}/`,{method:'DELETE'})
+      await load()
+    } catch(e){ setError(e.message) }
   }
 
   return <>
     <PageHeader
       title={isSale?'Sales & Invoices':'Purchases'}
       subtitle={isSale?'Create a sale, reduce stock, then preview or download a professional PDF invoice':'Record supplier purchases and automatically increase stock'}
-      actions={<Button onClick={()=>{setForm({...blank,items:[]});setOpen(true)}}>+ New {isSale?'Sale / Invoice':'Purchase'}</Button>}
+      actions={<Button onClick={()=>{setEditingId(null);setForm({...blank,items:[]});setOpen(true)}}>+ New {isSale?'Sale / Invoice':'Purchase'}</Button>}
     />
     <ErrorBox error={error}/>
 
@@ -128,13 +157,16 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
               <button className="invoice-action" onClick={()=>previewInvoice(d)}>Preview Invoice</button>
               <button className="invoice-action" onClick={()=>downloadInvoice(d)}>Download PDF</button>
             </>}
-            {d.status!=='CANCELLED' && <button className="danger-link" onClick={()=>cancelDoc(d)}>Cancel</button>}
+            <button className="invoice-action" style={{ marginLeft: '4px' }} onClick={()=>editDoc(d)}>Edit</button>
+            <button className="danger-link" style={{ marginLeft: '8px', color: '#dc3545' }} onClick={()=>deleteDoc(d)}>
+              Delete
+            </button>
           </td>
         </tr>)}</tbody>
       </table></div>
     </Card>
 
-    <Modal open={open} title={`New ${isSale?'Sale & Invoice':'Purchase'}`} onClose={()=>setOpen(false)} wide>
+    <Modal open={open} title={editingId ? `Edit ${isSale?'Sale / Invoice':'Purchase'}` : `New ${isSale?'Sale & Invoice':'Purchase'}`} onClose={()=>{setOpen(false);setEditingId(null);}} wide>
       <form onSubmit={save}>
         <div className="form-grid">
           <Select label={isSale?'Customer':'Supplier'} value={form.party} onChange={e=>setForm({...form,party:e.target.value})}>
@@ -173,8 +205,8 @@ export default function DocumentsPage({ mode='sale', currency='AED' }){
         </div>
 
         <div className="modal-actions">
-          <Button type="button" variant="ghost" onClick={()=>setOpen(false)}>Cancel</Button>
-          <Button disabled={!form.items.length}>{isSale?'Save Sale & Generate Invoice':'Save Purchase'}</Button>
+          <Button type="button" variant="ghost" onClick={()=>{setOpen(false);setEditingId(null);}}>Cancel</Button>
+          <Button disabled={!form.items.length}>{editingId ? 'Update Document' : (isSale ? 'Save Sale & Generate Invoice' : 'Save Purchase')}</Button>
         </div>
       </form>
     </Modal>
