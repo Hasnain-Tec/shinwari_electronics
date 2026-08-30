@@ -15,7 +15,11 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
+from django.db import transaction
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from .models import Customer, Sale, Payment
+from .serializers import CustomerSerializer
 from .models import Category, CompanySetting, Customer, Expense, ExpenseCategory, Payment, Product, Purchase, Sale, StockMovement, Supplier
 from .pdf import build_invoice_pdf, build_receipt_pdf
 from .permissions import IsAdminRole
@@ -51,23 +55,59 @@ class MeView(APIView):
     def get(self, request):
         return Response(UserSerializer(request.user).data)
 
+    def put(self, request):
+        return self.update_user(request)
+
+    def patch(self, request):
+        return self.update_user(request)
+
+    def update_user(self, request):
+        user = request.user
+        username = request.data.get('username', '').strip()
+        password = request.data.get('password', '').strip()
+
+        # Update username if changed and check uniqueness
+        if username and username != user.username:
+            if User.objects.filter(username=username).exclude(pk=user.pk).exists():
+                return Response({'detail': 'Username is already taken.'}, status=status.HTTP_400_BAD_REQUEST)
+            user.username = username
+
+        # Update password if provided
+        if password:
+            user.set_password(password)
+
+        user.save()
+
+        # Regenerate auth token so current user session stays valid
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
+
+        return Response({
+            'detail': 'Profile updated successfully.',
+            'token': token.key,
+            'user': UserSerializer(user).data
+        }, status=status.HTTP_200_OK)
+
 
 class CustomerViewSet(viewsets.ModelViewSet):
-    queryset = Customer.objects.all().order_by('name')
+    queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
-        try:
-            return super().destroy(request, *args, **kwargs)
-        except ProtectedError:
-            instance.is_active = False
-            instance.save(update_fields=['is_active', 'updated_at'])
-            return Response(
-                {'detail': 'Customer has linked sales or payment history and was marked inactive.'},
-                status=status.HTTP_200_OK
-            )
-
+        
+        with transaction.atomic():
+            # 1. Delete all payments connected to this customer
+            Payment.objects.filter(customer=instance).delete()
+            
+            # 2. Delete all sales/invoices connected to this customer
+            # (Deleting sales will automatically cascade and delete SaleItems)
+            Sale.objects.filter(customer=instance).delete()
+            
+            # 3. Delete the customer record
+            instance.delete()
+            
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all().order_by('name')

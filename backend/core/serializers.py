@@ -3,7 +3,6 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
-
 from .models import (
     Category, CompanySetting, Customer, EmployeeProfile, Expense, ExpenseCategory,
     Payment, Product, Purchase, PurchaseItem, Sale, SaleItem, StockMovement, Supplier
@@ -12,10 +11,8 @@ from .utils import get_company_setting, next_number
 
 TWOPLACES = Decimal('0.01')
 
-
 def money(value):
     return Decimal(value).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
-
 
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(source='employee_profile.role', read_only=True, default='ADMIN')
@@ -23,7 +20,6 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'email', 'is_active', 'role']
-
 
 class EmployeeCreateUpdateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -66,13 +62,11 @@ class EmployeeCreateUpdateSerializer(serializers.ModelSerializer):
             profile.save(update_fields=['role'])
         return instance
 
-
 class CompanySettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = CompanySetting
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
-
 
 class CustomerSerializer(serializers.ModelSerializer):
     outstanding_balance = serializers.SerializerMethodField()
@@ -87,7 +81,6 @@ class CustomerSerializer(serializers.ModelSerializer):
         balance = money(obj.opening_balance + sales_total - payments_total)
         return max(balance, Decimal('0'))
 
-
 class SupplierSerializer(serializers.ModelSerializer):
     outstanding_balance = serializers.SerializerMethodField()
 
@@ -100,12 +93,10 @@ class SupplierSerializer(serializers.ModelSerializer):
         payments_total = sum((p.amount for p in obj.payments.all()), Decimal('0'))
         return money(obj.opening_balance + purchase_total - payments_total)
 
-
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = '__all__'
-
 
 class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
@@ -126,12 +117,14 @@ class ProductSerializer(serializers.ModelSerializer):
         if opening != 0:
             request = self.context.get('request')
             StockMovement.objects.create(
-                product=product, movement_type='OPENING_STOCK', quantity=opening,
-                balance_after=opening, note='Opening stock',
+                product=product,
+                movement_type='OPENING_STOCK',
+                quantity=opening,
+                balance_after=opening,
+                note='Opening stock',
                 created_by=request.user if request and request.user.is_authenticated else None,
             )
         return product
-
 
 class StockMovementSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -141,7 +134,6 @@ class StockMovementSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockMovement
         fields = '__all__'
-
 
 class StockAdjustmentSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
@@ -170,7 +162,6 @@ class StockAdjustmentSerializer(serializers.Serializer):
                 created_by=self.context['request'].user,
             )
 
-
 class SaleItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
@@ -179,7 +170,6 @@ class SaleItemSerializer(serializers.ModelSerializer):
         model = SaleItem
         fields = '__all__'
         read_only_fields = ['sale', 'description', 'vat_amount', 'line_total', 'cost_price']
-
 
 class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True)
@@ -270,12 +260,103 @@ class SaleSerializer(serializers.ModelSerializer):
             if sale.amount_paid > 0 and sale.customer:
                 Payment.objects.create(
                     receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),
-                    party_type='CUSTOMER', customer=sale.customer, sale=sale,
-                    date=sale.date, amount=sale.amount_paid, payment_method=sale.payment_mode if sale.payment_mode in ['CASH','BANK','CARD','CHEQUE'] else 'CASH',
-                    notes=f'Auto receipt for {sale.invoice_no}', created_by=request.user,
+                    party_type='CUSTOMER',
+                    customer=sale.customer,
+                    sale=sale,
+                    date=sale.date,
+                    amount=sale.amount_paid,
+                    payment_method=sale.payment_mode if sale.payment_mode in ['CASH','BANK','CARD','CHEQUE'] else 'CASH',
+                    notes=f'Auto receipt for {sale.invoice_no}',
+                    created_by=request.user,
                 )
             return sale
 
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        request = self.context.get('request')
+
+        with transaction.atomic():
+            # Update basic Sale fields
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+            if items_data is not None:
+                # 1. Reverse previous stock allocations for existing sale items
+                for existing_item in instance.items.all():
+                    product = Product.objects.select_for_update().get(pk=existing_item.product.pk)
+                    product.current_stock += existing_item.quantity
+                    product.save(update_fields=['current_stock', 'updated_at'])
+
+                # Clear old items
+                instance.items.all().delete()
+
+                # 2. Add new items and deduct current stock
+                subtotal = Decimal('0')
+                discount_total = Decimal('0')
+                vat_total = Decimal('0')
+
+                for item_data in items_data:
+                    product = Product.objects.select_for_update().get(pk=item_data['product'].pk)
+                    qty = item_data['quantity']
+
+                    if product.current_stock < qty:
+                        raise serializers.ValidationError({
+                            'items': f'Insufficient stock for {product.name}. Available: {product.current_stock}'
+                        })
+
+                    unit_price = item_data.get('unit_price', product.selling_price)
+                    discount = item_data.get('discount', Decimal('0'))
+                    vat_rate = item_data.get('vat_rate', product.vat_rate)
+
+                    gross = money(qty * unit_price)
+                    if discount > gross:
+                        raise serializers.ValidationError({
+                            'items': f'Discount exceeds line amount for {product.name}.'
+                        })
+
+                    taxable = money(gross - discount)
+                    vat_amount = money(taxable * vat_rate / Decimal('100'))
+                    line_total = money(taxable + vat_amount)
+
+                    SaleItem.objects.create(
+                        sale=instance,
+                        product=product,
+                        description=product.name,
+                        quantity=qty,
+                        unit_price=unit_price,
+                        discount=discount,
+                        vat_rate=vat_rate,
+                        vat_amount=vat_amount,
+                        line_total=line_total,
+                        cost_price=product.purchase_price,
+                    )
+
+                    product.current_stock -= qty
+                    product.save(update_fields=['current_stock', 'updated_at'])
+
+                    StockMovement.objects.create(
+                        product=product,
+                        movement_type='SALE_UPDATE',
+                        quantity=-qty,
+                        balance_after=product.current_stock,
+                        reference_type='SALE',
+                        reference_id=instance.id,
+                        note=f'Updated invoice {instance.invoice_no}',
+                        created_by=request.user if request and request.user.is_authenticated else None,
+                    )
+
+                    subtotal += gross
+                    discount_total += discount
+                    vat_total += vat_amount
+
+                instance.subtotal = money(subtotal)
+                instance.discount_total = money(discount_total)
+                instance.vat_total = money(vat_total)
+                instance.total = money(subtotal - discount_total + vat_total)
+                instance.save(update_fields=['subtotal', 'discount_total', 'vat_total', 'total', 'updated_at'])
+
+        return instance
 
 class PurchaseItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -285,7 +366,6 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
         model = PurchaseItem
         fields = '__all__'
         read_only_fields = ['purchase', 'description', 'vat_amount', 'line_total']
-
 
 class PurchaseSerializer(serializers.ModelSerializer):
     items = PurchaseItemSerializer(many=True)
@@ -333,17 +413,28 @@ class PurchaseSerializer(serializers.ModelSerializer):
                 vat_amount = money(taxable * vat_rate / Decimal('100'))
                 line_total = money(taxable + vat_amount)
                 PurchaseItem.objects.create(
-                    purchase=purchase, product=product, description=product.name,
-                    quantity=qty, unit_cost=unit_cost, discount=discount,
-                    vat_rate=vat_rate, vat_amount=vat_amount, line_total=line_total,
+                    purchase=purchase,
+                    product=product,
+                    description=product.name,
+                    quantity=qty,
+                    unit_cost=unit_cost,
+                    discount=discount,
+                    vat_rate=vat_rate,
+                    vat_amount=vat_amount,
+                    line_total=line_total,
                 )
                 product.current_stock += qty
                 product.purchase_price = unit_cost
                 product.save(update_fields=['current_stock', 'purchase_price', 'updated_at'])
                 StockMovement.objects.create(
-                    product=product, movement_type='PURCHASE', quantity=qty,
-                    balance_after=product.current_stock, reference_type='PURCHASE',
-                    reference_id=purchase.id, note=purchase.purchase_no, created_by=request.user,
+                    product=product,
+                    movement_type='PURCHASE',
+                    quantity=qty,
+                    balance_after=product.current_stock,
+                    reference_type='PURCHASE',
+                    reference_id=purchase.id,
+                    note=purchase.purchase_no,
+                    created_by=request.user,
                 )
                 subtotal += gross
                 discount_total += discount
@@ -358,12 +449,16 @@ class PurchaseSerializer(serializers.ModelSerializer):
             if purchase.amount_paid > 0 and purchase.supplier:
                 Payment.objects.create(
                     receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),
-                    party_type='SUPPLIER', supplier=purchase.supplier, purchase=purchase,
-                    date=purchase.date, amount=purchase.amount_paid, payment_method=purchase.payment_mode if purchase.payment_mode in ['CASH','BANK','CARD','CHEQUE'] else 'CASH',
-                    notes=f'Auto payment for {purchase.purchase_no}', created_by=request.user,
+                    party_type='SUPPLIER',
+                    supplier=purchase.supplier,
+                    purchase=purchase,
+                    date=purchase.date,
+                    amount=purchase.amount_paid,
+                    payment_method=purchase.payment_mode if purchase.payment_mode in ['CASH','BANK','CARD','CHEQUE'] else 'CASH',
+                    notes=f'Auto payment for {purchase.purchase_no}',
+                    created_by=request.user,
                 )
             return purchase
-
 
 class PaymentSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source='customer.name', read_only=True)
@@ -386,21 +481,16 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         company = get_company_setting()
-
-        # If the API supplies a sale, preserve that relationship so invoice
-        # balance and payment history can be calculated from actual payments.
         return Payment.objects.create(
             receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),
             created_by=self.context['request'].user,
             **validated_data,
         )
 
-
 class ExpenseCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpenseCategory
         fields = '__all__'
-
 
 class ExpenseSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
