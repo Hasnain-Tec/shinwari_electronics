@@ -101,8 +101,18 @@ class CategorySerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     low_stock = serializers.SerializerMethodField()
-    opening_stock = serializers.DecimalField(max_digits=14, decimal_places=3, write_only=True, required=False, default=Decimal('0'))
-    current_stock = serializers.DecimalField(max_digits=14, decimal_places=3, required=False)
+    opening_stock = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        write_only=True,
+        required=False,
+        default=Decimal('0')
+    )
+    current_stock = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        required=False
+    )
 
     class Meta:
         model = Product
@@ -113,47 +123,67 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         opening = validated_data.pop('opening_stock', Decimal('0'))
-        # If opening stock wasn't supplied, check if current_stock was passed
-        if opening == Decimal('0') and 'current_stock' in validated_data:
-            opening = validated_data.pop('current_stock', Decimal('0'))
-        
-        product = Product.objects.create(current_stock=opening, **validated_data)
+        submitted_stock = validated_data.pop('current_stock', None)
+
+        if opening == Decimal('0') and submitted_stock is not None:
+            opening = submitted_stock
+
+        product = Product.objects.create(
+            current_stock=opening,
+            **validated_data
+        )
+
         if opening != 0:
             request = self.context.get('request')
+
             StockMovement.objects.create(
                 product=product,
                 movement_type='OPENING_STOCK',
                 quantity=opening,
                 balance_after=opening,
                 note='Opening stock',
-                created_by=request.user if request and request.user.is_authenticated else None,
+                created_by=(
+                    request.user
+                    if request and request.user.is_authenticated
+                    else None
+                ),
             )
+
         return product
 
     def update(self, instance, validated_data):
         new_stock = validated_data.pop('current_stock', None)
-        
-        # Perform standard update for all other fields
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-            
-        # If current_stock was explicitly edited/submitted
+
         if new_stock is not None and new_stock != instance.current_stock:
             diff = new_stock - instance.current_stock
             instance.current_stock = new_stock
-            
+
             request = self.context.get('request')
+
             StockMovement.objects.create(
                 product=instance,
                 movement_type='ADJUSTMENT_IN' if diff > 0 else 'ADJUSTMENT_OUT',
                 quantity=diff,
                 balance_after=new_stock,
                 note='Manual edit from Inventory page',
-                created_by=request.user if request and request.user.is_authenticated else None,
+                created_by=(
+                    request.user
+                    if request and request.user.is_authenticated
+                    else None
+                ),
             )
 
         instance.save()
         return instance
+
+
+class StockMovementSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
 class StockMovementSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
@@ -162,12 +192,55 @@ class StockMovementSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockMovement
         fields = '__all__'
+
+
 class StockAdjustmentSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
-    adjustment_type = serializers.ChoiceField(choices=['ADJUSTMENT_IN', 'ADJUSTMENT_OUT'])
-    quantity = serializers.DecimalField(max_digits=14, decimal_places=3, min_value=Decimal('0.001'))
+    adjustment_type = serializers.ChoiceField(
+        choices=['ADJUSTMENT_IN', 'ADJUSTMENT_OUT']
+    )
+    quantity = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        min_value=Decimal('0.001')
+    )
     note = serializers.CharField(required=False, allow_blank=True)
 
+    def create(self, validated_data):
+        with transaction.atomic():
+            product = Product.objects.select_for_update().get(
+                pk=validated_data['product'].pk
+            )
+
+            qty = validated_data['quantity']
+
+            if validated_data['adjustment_type'] == 'ADJUSTMENT_OUT':
+                if product.current_stock < qty:
+                    raise serializers.ValidationError({
+                        'quantity': 'Insufficient stock for this adjustment.'
+                    })
+                signed_qty = -qty
+            else:
+                signed_qty = qty
+
+            product.current_stock += signed_qty
+
+            product.save(
+                update_fields=['current_stock', 'updated_at']
+            )
+
+            return StockMovement.objects.create(
+                product=product,
+                movement_type=validated_data['adjustment_type'],
+                quantity=signed_qty,
+                balance_after=product.current_stock,
+                note=validated_data.get('note', ''),
+                created_by=self.context['request'].user,
+            )
+
+    class Meta:
+        model = StockMovement
+        fields = '__all__'
     def create(self, validated_data):
         with transaction.atomic():
             product = Product.objects.select_for_update().get(pk=validated_data['product'].pk)
