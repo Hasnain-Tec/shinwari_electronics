@@ -102,17 +102,21 @@ class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     low_stock = serializers.SerializerMethodField()
     opening_stock = serializers.DecimalField(max_digits=14, decimal_places=3, write_only=True, required=False, default=Decimal('0'))
+    current_stock = serializers.DecimalField(max_digits=14, decimal_places=3, required=False)
 
     class Meta:
         model = Product
         fields = '__all__'
-        read_only_fields = ['current_stock']
 
     def get_low_stock(self, obj):
         return obj.current_stock <= obj.min_stock
 
     def create(self, validated_data):
         opening = validated_data.pop('opening_stock', Decimal('0'))
+        # If opening stock wasn't supplied, check if current_stock was passed
+        if opening == Decimal('0') and 'current_stock' in validated_data:
+            opening = validated_data.pop('current_stock', Decimal('0'))
+        
         product = Product.objects.create(current_stock=opening, **validated_data)
         if opening != 0:
             request = self.context.get('request')
@@ -126,6 +130,30 @@ class ProductSerializer(serializers.ModelSerializer):
             )
         return product
 
+    def update(self, instance, validated_data):
+        new_stock = validated_data.pop('current_stock', None)
+        
+        # Perform standard update for all other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+            
+        # If current_stock was explicitly edited/submitted
+        if new_stock is not None and new_stock != instance.current_stock:
+            diff = new_stock - instance.current_stock
+            instance.current_stock = new_stock
+            
+            request = self.context.get('request')
+            StockMovement.objects.create(
+                product=instance,
+                movement_type='ADJUSTMENT_IN' if diff > 0 else 'ADJUSTMENT_OUT',
+                quantity=diff,
+                balance_after=new_stock,
+                note='Manual edit from Inventory page',
+                created_by=request.user if request and request.user.is_authenticated else None,
+            )
+
+        instance.save()
+        return instance
 class StockMovementSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
@@ -134,7 +162,6 @@ class StockMovementSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockMovement
         fields = '__all__'
-
 class StockAdjustmentSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
     adjustment_type = serializers.ChoiceField(choices=['ADJUSTMENT_IN', 'ADJUSTMENT_OUT'])
