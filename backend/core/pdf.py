@@ -25,11 +25,13 @@ from .utils import get_company_setting
 FONT_DIR = os.path.dirname(__file__)
 URDU_FONT_PATH = os.path.join(FONT_DIR, 'NotoNaskhArabic-Regular.ttf')
 URDU_FONT_NAME = 'Helvetica'
+
 if os.path.exists(URDU_FONT_PATH):
     pdfmetrics.registerFont(TTFont('UrduFont', URDU_FONT_PATH))
     URDU_FONT_NAME = 'UrduFont'
 
 DARK = colors.HexColor('#000000')
+
 
 def _decimal(value):
     try:
@@ -37,16 +39,20 @@ def _decimal(value):
     except Exception:
         return Decimal('0')
 
+
 def _money_fmt(value):
     val = _decimal(value)
     return f'{val:,.0f}' if val % 1 == 0 else f'{val:,.2f}'
+
 
 def _qty_fmt(value):
     val = _decimal(value)
     return f'{val:,.0f}' if val % 1 == 0 else f'{val:,.2f}'
 
+
 def _safe(value):
     return str(value or '').strip()
+
 
 def _format_urdu_text(text):
     """ Fixes Urdu joining and RTL display """
@@ -60,16 +66,18 @@ def _format_urdu_text(text):
             return text
     return text
 
+
 def _draw_wrapped_urdu(c, x, y_top, text, width, font_name=URDU_FONT_NAME, size=8.5, leading=12):
     """ Draws multi-line Urdu/English text dynamically """
     if not text:
         return
     c.setFont(font_name, size)
     c.setFillColor(DARK)
-    
+
     # Split into lines by newline or auto-wrap
     raw_lines = text.split('\n')
     lines = []
+
     for r_line in raw_lines:
         words = r_line.split()
         current_line = []
@@ -84,12 +92,13 @@ def _draw_wrapped_urdu(c, x, y_top, text, width, font_name=URDU_FONT_NAME, size=
                 current_line = [word]
         if current_line:
             lines.append(' '.join(current_line))
-            
+
     curr_y = y_top
     for line in lines:
         formatted_line = _format_urdu_text(line)
         c.drawRightString(x, curr_y, formatted_line)
         curr_y -= leading
+
 
 def _get_previous_balance(sale):
     for name in ['previous_balance', 'previous_amount', 'opening_balance', 'balance_brought_forward', 'old_balance']:
@@ -97,12 +106,15 @@ def _get_previous_balance(sale):
             val = _decimal(getattr(sale, name))
             if val != Decimal('0'):
                 return val
+
     customer = getattr(sale, 'customer', None)
     if customer:
         for name in ['previous_balance', 'opening_balance', 'balance']:
             if hasattr(customer, name):
                 return _decimal(getattr(customer, name))
+
     return Decimal('0')
+
 
 def _get_total_paid(sale):
     if hasattr(sale, 'payments') or hasattr(sale, 'sale_payments'):
@@ -111,12 +123,31 @@ def _get_total_paid(sale):
             return sum(_decimal(getattr(p, 'amount', 0)) for p in relation.all())
     return _decimal(getattr(sale, 'amount_paid', getattr(sale, 'paid_amount', 0)))
 
+
+def _get_discount(sale):
+    """ Check item-level discounts first, then fallback to sale-level attributes """
+    total_item_discount = Decimal('0')
+    if hasattr(sale, 'items') and sale.items.exists():
+        for item in sale.items.all():
+            total_item_discount += _decimal(getattr(item, 'discount', 0))
+
+    if total_item_discount > Decimal('0'):
+        return total_item_discount
+
+    for attr in ['discount', 'discount_amount', 'total_discount', 'extra_discount']:
+        if hasattr(sale, attr):
+            val = _decimal(getattr(sale, attr))
+            if val != Decimal('0'):
+                return val
+
+    return Decimal('0')
+
+
 def build_invoice_pdf(sale):
     setting = get_company_setting()
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     w, h = A4
-
     margin_left = 15 * mm
     margin_right = 15 * mm
     printable_width = w - margin_left - margin_right
@@ -258,25 +289,27 @@ def build_invoice_pdf(sale):
     c.drawCentredString(margin_left + col_widths[0] + col_widths[1] + col_widths[2] / 2, cur_y + 2 * mm, _qty_fmt(total_qty))
 
     # 5. FINANCIAL BREAKDOWN & DYNAMIC URDU TERMS FROM SETTINGS
-    footer_y = cur_y - 12 * mm
+    footer_y = cur_y - 4 * mm
     fin_w = 80 * mm
     fin_x = w - margin_right - fin_w
     fin_row_h = 6.5 * mm
 
     amount = _decimal(getattr(sale, 'total', 0))
+    discount = _get_discount(sale)
     prev_balance = _get_previous_balance(sale)
     paid = _get_total_paid(sale)
-    balance = (amount + prev_balance) - paid
+    balance = (amount - discount + prev_balance) - paid
 
     fin_data = [
         ('Amount', _money_fmt(amount)),
+        ('Discount', _money_fmt(discount)),
         ('Prev Balance', _money_fmt(prev_balance)),
         ('Amount Paid', _money_fmt(paid)),
         ('Balance', _money_fmt(balance))
     ]
 
     for idx, (lbl, val) in enumerate(fin_data):
-        fy = footer_y - (idx + 1) * fin_row_h
+        fy = footer_y - ((idx + 1) * fin_row_h)
         c.rect(fin_x, fy, fin_w, fin_row_h)
         c.line(fin_x + fin_w - 30 * mm, fy, fin_x + fin_w - 30 * mm, fy + fin_row_h)
         c.setFont('Helvetica-Bold', 8.5)
@@ -301,16 +334,12 @@ def build_invoice_pdf(sale):
     c.save()
     return buf.getvalue()
 
+
 def build_receipt_pdf(payment):
     setting = get_company_setting()
     buf = BytesIO()
     doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        rightMargin=20*mm,
-        leftMargin=20*mm,
-        topMargin=20*mm,
-        bottomMargin=20*mm
+        buf, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm
     )
     styles = getSampleStyleSheet()
 
@@ -323,8 +352,7 @@ def build_receipt_pdf(payment):
     party = (
         payment.customer.name
         if getattr(payment, 'party_type', None) == 'CUSTOMER' and getattr(payment, 'customer', None)
-        else payment.supplier.name
-        if getattr(payment, 'supplier', None)
+        else payment.supplier.name if getattr(payment, 'supplier', None)
         else ''
     )
 
