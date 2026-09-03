@@ -4,8 +4,20 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from .models import (
-    Category, CompanySetting, Customer, EmployeeProfile, Expense, ExpenseCategory,
-    Payment, Product, Purchase, PurchaseItem, Sale, SaleItem, StockMovement, Supplier
+    Category,
+    CompanySetting,
+    Customer,
+    EmployeeProfile,
+    Expense,
+    ExpenseCategory,
+    Payment,
+    Product,
+    Purchase,
+    PurchaseItem,
+    Sale,
+    SaleItem,
+    StockMovement,
+    Supplier
 )
 from .utils import get_company_setting, next_number
 
@@ -102,16 +114,10 @@ class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     low_stock = serializers.SerializerMethodField()
     opening_stock = serializers.DecimalField(
-        max_digits=14,
-        decimal_places=3,
-        write_only=True,
-        required=False,
-        default=Decimal('0')
+        max_digits=14, decimal_places=3, write_only=True, required=False, default=Decimal('0')
     )
     current_stock = serializers.DecimalField(
-        max_digits=14,
-        decimal_places=3,
-        required=False
+        max_digits=14, decimal_places=3, required=False
     )
 
     class Meta:
@@ -124,18 +130,13 @@ class ProductSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         opening = validated_data.pop('opening_stock', Decimal('0'))
         submitted_stock = validated_data.pop('current_stock', None)
-
         if opening == Decimal('0') and submitted_stock is not None:
             opening = submitted_stock
-
         product = Product.objects.create(
-            current_stock=opening,
-            **validated_data
+            current_stock=opening, **validated_data
         )
-
         if opening != 0:
             request = self.context.get('request')
-
             StockMovement.objects.create(
                 product=product,
                 movement_type='OPENING_STOCK',
@@ -143,26 +144,19 @@ class ProductSerializer(serializers.ModelSerializer):
                 balance_after=opening,
                 note='Opening stock',
                 created_by=(
-                    request.user
-                    if request and request.user.is_authenticated
-                    else None
+                    request.user if request and request.user.is_authenticated else None
                 ),
             )
-
         return product
 
     def update(self, instance, validated_data):
         new_stock = validated_data.pop('current_stock', None)
-
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-
         if new_stock is not None and new_stock != instance.current_stock:
             diff = new_stock - instance.current_stock
             instance.current_stock = new_stock
-
             request = self.context.get('request')
-
             StockMovement.objects.create(
                 product=instance,
                 movement_type='ADJUSTMENT_IN' if diff > 0 else 'ADJUSTMENT_OUT',
@@ -170,20 +164,12 @@ class ProductSerializer(serializers.ModelSerializer):
                 balance_after=new_stock,
                 note='Manual edit from Inventory page',
                 created_by=(
-                    request.user
-                    if request and request.user.is_authenticated
-                    else None
+                    request.user if request and request.user.is_authenticated else None
                 ),
             )
-
         instance.save()
         return instance
 
-
-class StockMovementSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    product_sku = serializers.CharField(source='product.sku', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
 class StockMovementSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
@@ -193,16 +179,13 @@ class StockMovementSerializer(serializers.ModelSerializer):
         model = StockMovement
         fields = '__all__'
 
-
 class StockAdjustmentSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
     adjustment_type = serializers.ChoiceField(
         choices=['ADJUSTMENT_IN', 'ADJUSTMENT_OUT']
     )
     quantity = serializers.DecimalField(
-        max_digits=14,
-        decimal_places=3,
-        min_value=Decimal('0.001')
+        max_digits=14, decimal_places=3, min_value=Decimal('0.001')
     )
     note = serializers.CharField(required=False, allow_blank=True)
 
@@ -211,9 +194,7 @@ class StockAdjustmentSerializer(serializers.Serializer):
             product = Product.objects.select_for_update().get(
                 pk=validated_data['product'].pk
             )
-
             qty = validated_data['quantity']
-
             if validated_data['adjustment_type'] == 'ADJUSTMENT_OUT':
                 if product.current_stock < qty:
                     raise serializers.ValidationError({
@@ -222,37 +203,10 @@ class StockAdjustmentSerializer(serializers.Serializer):
                 signed_qty = -qty
             else:
                 signed_qty = qty
-
             product.current_stock += signed_qty
-
             product.save(
                 update_fields=['current_stock', 'updated_at']
             )
-
-            return StockMovement.objects.create(
-                product=product,
-                movement_type=validated_data['adjustment_type'],
-                quantity=signed_qty,
-                balance_after=product.current_stock,
-                note=validated_data.get('note', ''),
-                created_by=self.context['request'].user,
-            )
-
-    class Meta:
-        model = StockMovement
-        fields = '__all__'
-    def create(self, validated_data):
-        with transaction.atomic():
-            product = Product.objects.select_for_update().get(pk=validated_data['product'].pk)
-            qty = validated_data['quantity']
-            if validated_data['adjustment_type'] == 'ADJUSTMENT_OUT':
-                if product.current_stock < qty:
-                    raise serializers.ValidationError({'quantity': 'Insufficient stock for this adjustment.'})
-                signed_qty = -qty
-            else:
-                signed_qty = qty
-            product.current_stock += signed_qty
-            product.save(update_fields=['current_stock', 'updated_at'])
             return StockMovement.objects.create(
                 product=product,
                 movement_type=validated_data['adjustment_type'],
@@ -285,8 +239,7 @@ class SaleSerializer(serializers.ModelSerializer):
     def get_balance_due(self, obj):
         if obj.customer_id:
             paid = sum(
-                (p.amount for p in obj.customer.payments.filter(sale=obj)),
-                Decimal('0')
+                (p.amount for p in obj.customer.payments.filter(sale=obj)), Decimal('0')
             )
         else:
             paid = obj.amount_paid
@@ -357,6 +310,7 @@ class SaleSerializer(serializers.ModelSerializer):
             sale.vat_total = money(vat_total)
             sale.total = money(subtotal - discount_total + vat_total)
             sale.save(update_fields=['subtotal', 'discount_total', 'vat_total', 'total', 'updated_at'])
+
             if sale.amount_paid > 0 and sale.customer:
                 Payment.objects.create(
                     receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),
@@ -374,51 +328,40 @@ class SaleSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         request = self.context.get('request')
-
         with transaction.atomic():
-            # Update basic Sale fields
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()
 
             if items_data is not None:
-                # 1. Reverse previous stock allocations for existing sale items
                 for existing_item in instance.items.all():
                     product = Product.objects.select_for_update().get(pk=existing_item.product.pk)
                     product.current_stock += existing_item.quantity
                     product.save(update_fields=['current_stock', 'updated_at'])
 
-                # Clear old items
                 instance.items.all().delete()
 
-                # 2. Add new items and deduct current stock
                 subtotal = Decimal('0')
                 discount_total = Decimal('0')
                 vat_total = Decimal('0')
-
                 for item_data in items_data:
                     product = Product.objects.select_for_update().get(pk=item_data['product'].pk)
                     qty = item_data['quantity']
-
                     if product.current_stock < qty:
                         raise serializers.ValidationError({
                             'items': f'Insufficient stock for {product.name}. Available: {product.current_stock}'
                         })
-
                     unit_price = item_data.get('unit_price', product.selling_price)
                     discount = item_data.get('discount', Decimal('0'))
                     vat_rate = item_data.get('vat_rate', product.vat_rate)
-
                     gross = money(qty * unit_price)
                     if discount > gross:
                         raise serializers.ValidationError({
                             'items': f'Discount exceeds line amount for {product.name}.'
                         })
-
                     taxable = money(gross - discount)
                     vat_amount = money(taxable * vat_rate / Decimal('100'))
                     line_total = money(taxable + vat_amount)
-
                     SaleItem.objects.create(
                         sale=instance,
                         product=product,
@@ -431,10 +374,8 @@ class SaleSerializer(serializers.ModelSerializer):
                         line_total=line_total,
                         cost_price=product.purchase_price,
                     )
-
                     product.current_stock -= qty
                     product.save(update_fields=['current_stock', 'updated_at'])
-
                     StockMovement.objects.create(
                         product=product,
                         movement_type='SALE_UPDATE',
@@ -445,18 +386,15 @@ class SaleSerializer(serializers.ModelSerializer):
                         note=f'Updated invoice {instance.invoice_no}',
                         created_by=request.user if request and request.user.is_authenticated else None,
                     )
-
                     subtotal += gross
                     discount_total += discount
                     vat_total += vat_amount
-
                 instance.subtotal = money(subtotal)
                 instance.discount_total = money(discount_total)
                 instance.vat_total = money(vat_total)
                 instance.total = money(subtotal - discount_total + vat_total)
                 instance.save(update_fields=['subtotal', 'discount_total', 'vat_total', 'total', 'updated_at'])
-
-        return instance
+            return instance
 
 class PurchaseItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -546,6 +484,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
             if purchase.amount_paid > purchase.total:
                 raise serializers.ValidationError({'amount_paid': 'Paid amount cannot exceed purchase total.'})
             purchase.save(update_fields=['subtotal', 'discount_total', 'vat_total', 'total', 'updated_at'])
+
             if purchase.amount_paid > 0 and purchase.supplier:
                 Payment.objects.create(
                     receipt_no=next_number(company.receipt_prefix, Payment, 'receipt_no'),

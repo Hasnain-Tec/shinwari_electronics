@@ -9,6 +9,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from django.utils import timezone
 
 # Libraries to fix Urdu RTL joining & black box issues
 try:
@@ -23,7 +24,6 @@ from .utils import get_company_setting
 # Register custom Urdu font if present
 FONT_DIR = os.path.dirname(__file__)
 URDU_FONT_PATH = os.path.join(FONT_DIR, 'NotoNaskhArabic-Regular.ttf')
-
 URDU_FONT_NAME = 'Helvetica'
 if os.path.exists(URDU_FONT_PATH):
     pdfmetrics.registerFont(TTFont('UrduFont', URDU_FONT_PATH))
@@ -70,7 +70,6 @@ def _draw_wrapped_urdu(c, x, y_top, text, width, font_name=URDU_FONT_NAME, size=
     # Split into lines by newline or auto-wrap
     raw_lines = text.split('\n')
     lines = []
-    
     for r_line in raw_lines:
         words = r_line.split()
         current_line = []
@@ -85,7 +84,7 @@ def _draw_wrapped_urdu(c, x, y_top, text, width, font_name=URDU_FONT_NAME, size=
                 current_line = [word]
         if current_line:
             lines.append(' '.join(current_line))
-
+            
     curr_y = y_top
     for line in lines:
         formatted_line = _format_urdu_text(line)
@@ -146,17 +145,27 @@ def build_invoice_pdf(sale):
     box_h = 10 * mm
     box_x = w - margin_right - box_w
     top_box_y = h - 28 * mm
-
     c.setLineWidth(0.6)
+
+    # Extract date & time safely using local timezone logic
+    created_dt = getattr(sale, 'created_at', None)
+    if created_dt:
+        if timezone.is_aware(created_dt):
+            created_dt = timezone.localtime(created_dt)
+        date_str = created_dt.strftime('%d-%b-%Y')
+        time_str = created_dt.strftime('%I:%M %p')
+    else:
+        date_str = _safe(getattr(sale, 'date', ''))
+        time_str = '-'
+
     c.rect(box_x, top_box_y, box_w, box_h)
     c.setFont('Helvetica', 8)
     c.drawCentredString(box_x + box_w / 2, top_box_y + 6 * mm, 'Dated')
-    c.drawCentredString(box_x + box_w / 2, top_box_y + 2 * mm, _safe(getattr(sale, 'date', '')))
+    c.drawCentredString(box_x + box_w / 2, top_box_y + 2 * mm, date_str)
 
     top_box_y -= (box_h + 2 * mm)
     c.rect(box_x, top_box_y, box_w, box_h)
     c.drawCentredString(box_x + box_w / 2, top_box_y + 6 * mm, 'Time')
-    time_str = sale.created_at.strftime('%I:%M %p') if hasattr(sale, 'created_at') and sale.created_at else ''
     c.drawCentredString(box_x + box_w / 2, top_box_y + 2 * mm, time_str)
 
     top_box_y -= (box_h + 2 * mm)
@@ -177,8 +186,8 @@ def build_invoice_pdf(sale):
     cust_name = customer.name if customer else 'Walk-in Customer'
     cust_phone = customer.phone if customer and customer.phone else ''
     cust_city = customer.city if customer and customer.city else ''
-
     cust_title = f"{cust_name} / {cust_phone}".strip(' /')
+
     c.setFont('Helvetica-Bold', 10)
     c.drawString(margin_left + 3 * mm, y + 7 * mm, cust_title)
     if cust_city:
@@ -213,8 +222,8 @@ def build_invoice_pdf(sale):
     for idx, item in enumerate(items, 1):
         cur_y -= row_h
         c.rect(margin_left, cur_y, printable_width, row_h)
-        
         cx = margin_left
+
         qty = _decimal(getattr(item, 'quantity', 0))
         price = _decimal(getattr(item, 'unit_price', 0))
         line_total = _decimal(getattr(item, 'line_total', qty * price))
@@ -270,7 +279,6 @@ def build_invoice_pdf(sale):
         fy = footer_y - (idx + 1) * fin_row_h
         c.rect(fin_x, fy, fin_w, fin_row_h)
         c.line(fin_x + fin_w - 30 * mm, fy, fin_x + fin_w - 30 * mm, fy + fin_row_h)
-        
         c.setFont('Helvetica-Bold', 8.5)
         c.drawString(fin_x + 3 * mm, fy + 2 * mm, lbl)
         c.drawRightString(fin_x + fin_w - 3 * mm, fy + 2 * mm, val)
@@ -297,18 +305,29 @@ def build_receipt_pdf(payment):
     setting = get_company_setting()
     buf = BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm
+        buf,
+        pagesize=A4,
+        rightMargin=20*mm,
+        leftMargin=20*mm,
+        topMargin=20*mm,
+        bottomMargin=20*mm
     )
     styles = getSampleStyleSheet()
+
     story = [
         Paragraph(setting.company_name or 'Company Name', styles['Title']),
         Paragraph('PAYMENT RECEIPT', styles['Heading2']),
         Spacer(1, 10)
     ]
+
     party = (
-        payment.customer.name if getattr(payment, 'party_type', None) == 'CUSTOMER' and getattr(payment, 'customer', None)
-        else payment.supplier.name if getattr(payment, 'supplier', None) else ''
+        payment.customer.name
+        if getattr(payment, 'party_type', None) == 'CUSTOMER' and getattr(payment, 'customer', None)
+        else payment.supplier.name
+        if getattr(payment, 'supplier', None)
+        else ''
     )
+
     rows = [
         ['Receipt No', getattr(payment, 'receipt_no', '-')],
         ['Date', str(getattr(payment, 'date', '-'))],
@@ -319,6 +338,7 @@ def build_receipt_pdf(payment):
         ['Reference', getattr(payment, 'reference', None) or '-'],
         ['Notes', getattr(payment, 'notes', None) or '-']
     ]
+
     table = Table(rows, colWidths=[45*mm, 100*mm])
     table.setStyle(TableStyle([
         ('GRID', (0, 0), (-1, -1), 0.6, colors.HexColor('#CBD5E1')),
@@ -326,8 +346,10 @@ def build_receipt_pdf(payment):
         ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
         ('PADDING', (0, 0), (-1, -1), 7)
     ]))
+
     story.append(table)
     story.append(Spacer(1, 24))
     story.append(Paragraph('Authorized Signature: ______________________________', styles['Normal']))
+
     doc.build(story)
     return buf.getvalue()
